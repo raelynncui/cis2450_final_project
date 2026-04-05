@@ -1,0 +1,13 @@
+certifi==2026.2.25
+charset-normalizer==3.4.6
+idna==3.11
+kagglehub==1.0.0
+kagglesdk==0.1.16
+packaging==26.0
+polars==1.39.3
+polars-runtime-32==1.39.3
+protobuf==7.34.1
+PyYAML==6.0.3
+requests==2.33.1
+tqdm==4.67.3
+urllib3==2.6.3
