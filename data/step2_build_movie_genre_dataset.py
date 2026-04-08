@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 step2_build_movie_genre_dataset.py
 
@@ -9,6 +8,7 @@ for predicting movie/show genre from acoustic audio features.
 Final output: CSV where each row is a soundtrack recording with:
   - Movie metadata (IMDB ID, title, movie genres from TMDB)
   - AcousticBrainz audio features (BPM, danceability, key, loudness, etc.)
+  - One-hot encoded categorical features (key_key → 12 cols, key_scale → 1 col)
 """
 
 import polars as pl
@@ -20,20 +20,16 @@ import sys
 # CONFIG
 # ============================================================================
 
-# Intermediate CSVs from step 1
-SOUNDTRACK_RGS_CSV = "mb_soundtrack_rgs.csv"
-SOUNDTRACK_RECORDINGS_CSV = "mb_soundtrack_recordings.csv"
+SOUNDTRACK_RGS_CSV = "data/mb_soundtrack_rgs.csv"
+SOUNDTRACK_RECORDINGS_CSV = "data/mb_soundtrack_recordings.csv"
+TMDB_CSV = "data/TMDB_movie_dataset_v11.csv" # not included because too large
 
-# TMDB movie dataset (Kaggle CSV)
-TMDB_CSV = "TMDB_movie_dataset_v11.csv"
+# AcousticBrainz CSVs
+AB_RHYTHM_CSV = "data/acousticbrainz-lowlevel-features-20220623-rhythm.csv" # not included because too large
+AB_TONAL_CSV = "data/acousticbrainz-lowlevel-features-20220623-tonal.csv" # not included because too large
+AB_LOWLEVEL_CSV = "data/acousticbrainz-lowlevel-features-20220623-lowlevel.csv" # not included because too large
 
-# AcousticBrainz feature CSVs (auto-detected by keyword)
-AB_RHYTHM_CSV = ""    # leave blank for auto-detect
-AB_TONAL_CSV = ""     # leave blank for auto-detect
-AB_LOWLEVEL_CSV = ""  # leave blank for auto-detect
-
-# Output
-OUTPUT_CSV = "movie_genre_audio_features_dataset.csv"
+OUTPUT_CSV = "data/movie_genre_audio_features_dataset.csv"
 
 
 # ============================================================================
@@ -41,17 +37,24 @@ OUTPUT_CSV = "movie_genre_audio_features_dataset.csv"
 # ============================================================================
 
 def find_ab_file(keyword: str) -> str:
-    """Find an AcousticBrainz feature CSV by keyword in the filename."""
+    """Find an AcousticBrainz feature CSV by keyword at the END of the
+    filename (before .csv), to avoid the bug where all three files
+    match '*lowlevel*'."""
     patterns = [
-        f"*acousticbrainz*{keyword}*.csv",
-        f"*{keyword}*.csv",
+        f"*-{keyword}.csv",
+        f"*_{keyword}.csv",
+        f"*acousticbrainz*{keyword}*",
     ]
+    exclude = {"genre_audio", "mb_", "movie", "spotify", "TMDB"}
     for pat in patterns:
         matches = glob.glob(pat)
-        matches = [m for m in matches if "genre_audio" not in m
-                   and "mb_" not in m and "movie" not in m
-                   and "spotify" not in m and "TMDB" not in m]
+        matches = [m for m in matches if not any(ex in m for ex in exclude)]
+        if len(matches) == 1:
+            return matches[0]
         if matches:
+            exact = [m for m in matches if m.rsplit(".", 1)[0].endswith(keyword)]
+            if exact:
+                return exact[0]
             return matches[0]
     return ""
 
@@ -78,37 +81,40 @@ def main():
         print("Download from: https://www.kaggle.com/datasets/asaniczka/tmdb-movies-dataset-2023-930k-movies")
         sys.exit(1)
 
-    ab_rhythm = AB_RHYTHM_CSV or find_ab_file("rhythm")
-    ab_tonal = AB_TONAL_CSV or find_ab_file("tonal")
-    ab_lowlevel = AB_LOWLEVEL_CSV or find_ab_file("lowlevel")
+    ab_rhythm = AB_RHYTHM_CSV if os.path.exists(AB_RHYTHM_CSV) else find_ab_file("rhythm")
+    ab_tonal = AB_TONAL_CSV if os.path.exists(AB_TONAL_CSV) else find_ab_file("tonal")
+    ab_lowlevel = AB_LOWLEVEL_CSV if os.path.exists(AB_LOWLEVEL_CSV) else find_ab_file("lowlevel")
 
     print(f"\n  Input files:")
-    print(f"    Soundtrack RGs:       {SOUNDTRACK_RGS_CSV}")
-    print(f"    Soundtrack recordings:{SOUNDTRACK_RECORDINGS_CSV}")
-    print(f"    TMDB:                 {TMDB_CSV}")
-    print(f"    AB rhythm:            {ab_rhythm or 'NOT FOUND'}")
-    print(f"    AB tonal:             {ab_tonal or 'NOT FOUND'}")
-    print(f"    AB lowlevel:          {ab_lowlevel or 'NOT FOUND'}")
+    print(f"    Soundtrack RGs:        {SOUNDTRACK_RGS_CSV}")
+    print(f"    Soundtrack recordings: {SOUNDTRACK_RECORDINGS_CSV}")
+    print(f"    TMDB:                  {TMDB_CSV}")
+    print(f"    AB rhythm:             {ab_rhythm or 'NOT FOUND'}")
+    print(f"    AB tonal:              {ab_tonal or 'NOT FOUND'}")
+    print(f"    AB lowlevel:           {ab_lowlevel or 'NOT FOUND'}")
 
     if not all([ab_rhythm, ab_tonal, ab_lowlevel]):
         print("\nERROR: Could not find all three AcousticBrainz CSV files.")
-        print("Expected files matching patterns like:")
-        print("  *acousticbrainz*rhythm*.csv")
-        print("  *acousticbrainz*tonal*.csv")
-        print("  *acousticbrainz*lowlevel*.csv")
-        print("\nPlace them in the current directory or set the paths in CONFIG.")
+        sys.exit(1)
+
+    # Sanity check: make sure all three paths are distinct files
+    ab_paths = [os.path.abspath(p) for p in [ab_rhythm, ab_tonal, ab_lowlevel]]
+    if len(set(ab_paths)) < 3:
+        print("\nERROR: Two or more AcousticBrainz paths point to the same file!")
+        print(f"  rhythm:   {ab_rhythm}")
+        print(f"  tonal:    {ab_tonal}")
+        print(f"  lowlevel: {ab_lowlevel}")
+        print("Set the exact filenames in the CONFIG section.")
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # Load TMDB → get movie genres keyed by imdb_id
+    # Load TMDB → movie genres keyed by imdb_id
     # ------------------------------------------------------------------
     print(f"\n--- Loading TMDB movie dataset ---")
 
     tmdb = pl.read_csv(TMDB_CSV, infer_schema_length=10000)
     print(f"  Raw TMDB rows: {tmdb.shape[0]:,}")
-    print(f"  Columns: {tmdb.columns}")
 
-    # Standardize column names
     col_renames = {}
     for c in tmdb.columns:
         cl = c.lower().strip()
@@ -124,16 +130,13 @@ def main():
     tmdb = tmdb.rename(col_renames)
 
     if "tmdb_imdb_id" not in tmdb.columns:
-        print("ERROR: No imdb_id column found in TMDB dataset!")
-        print(f"  Available: {tmdb.columns}")
+        print(f"ERROR: No imdb_id column found. Available: {tmdb.columns}")
         sys.exit(1)
 
-    # Keep only rows with valid IMDB IDs and relevant columns
     keep_cols = [c for c in ["tmdb_imdb_id", "tmdb_id", "tmdb_title",
                              "movie_genres"] if c in tmdb.columns]
     tmdb = (
-        tmdb
-        .select(keep_cols)
+        tmdb.select(keep_cols)
         .with_columns(pl.col("tmdb_imdb_id").cast(pl.Utf8).str.strip_chars())
         .filter(pl.col("tmdb_imdb_id").str.starts_with("tt"))
         .unique(subset="tmdb_imdb_id", keep="first")
@@ -141,123 +144,97 @@ def main():
     print(f"  TMDB movies with valid IMDB ID: {tmdb.shape[0]:,}")
 
     # ------------------------------------------------------------------
-    # Load soundtrack release groups from step 1A
+    # Load soundtrack release groups + join with TMDB
     # ------------------------------------------------------------------
     print(f"\n--- Loading soundtrack release groups ---")
 
     rgs = pl.read_csv(SOUNDTRACK_RGS_CSV)
-    print(f"  Soundtrack release groups with IMDB links: {rgs.shape[0]:,}")
-    print(f"  Unique IMDB IDs: {rgs['imdb_id'].n_unique():,}")
+    print(f"  Soundtrack RGs with IMDB links: {rgs.shape[0]:,}")
 
-    # Join with TMDB to get movie genres
-    rgs = rgs.join(
-        tmdb,
-        left_on="imdb_id",
-        right_on="tmdb_imdb_id",
-        how="inner",
-    )
-    print(f"  After TMDB join (have movie genres): {rgs.shape[0]:,}")
+    rgs = rgs.join(tmdb, left_on="imdb_id", right_on="tmdb_imdb_id", how="inner")
+    print(f"  After TMDB join: {rgs.shape[0]:,}")
 
     if rgs.shape[0] == 0:
-        print("\nERROR: No IMDB IDs matched between soundtrack RGs and TMDB.")
-        print("  Check that IMDB ID formats match (both should be 'tt1234567').")
-        print(f"  Sample from soundtracks: {pl.read_csv(SOUNDTRACK_RGS_CSV)['imdb_id'].head(5).to_list()}")
-        print(f"  Sample from TMDB: {tmdb['tmdb_imdb_id'].head(5).to_list()}")
+        print("ERROR: No IMDB IDs matched between soundtrack RGs and TMDB.")
         sys.exit(1)
 
-    # Show genre distribution of movies we matched
-    print(f"\n  Movie genre distribution (top 15, raw TMDB genre strings):")
-    if "movie_genres" in rgs.columns:
-        genre_counts = (
-            rgs
-            .with_columns(pl.col("movie_genres").cast(pl.Utf8).fill_null(""))
-            .filter(pl.col("movie_genres") != "")
-            .group_by("movie_genres")
-            .len()
-            .sort("len", descending=True)
-            .head(15)
-        )
-        print(genre_counts)
-
     # ------------------------------------------------------------------
-    # Load soundtrack recordings from step 1B
+    # Load soundtrack recordings + join with release groups
     # ------------------------------------------------------------------
     print(f"\n--- Loading soundtrack recordings ---")
 
     recordings = pl.read_csv(SOUNDTRACK_RECORDINGS_CSV)
-    print(f"  Total recording rows (with possible dups): {recordings.shape[0]:,}")
+    print(f"  Raw recording rows: {recordings.shape[0]:,}")
 
-    # Deduplicate: same recording appearing in multiple editions
-    recordings = recordings.unique(
-        subset=["recording_mbid", "rg_id"], keep="first"
-    )
-    print(f"  After dedup (unique recording-rg pairs):   {recordings.shape[0]:,}")
-    print(f"  Unique recording MBIDs: {recordings['recording_mbid'].n_unique():,}")
+    recordings = recordings.unique(subset=["recording_mbid", "rg_id"], keep="first")
+    print(f"  After dedup: {recordings.shape[0]:,}")
 
-    # Join recordings with release groups (which now have movie genres)
-    rec_with_movie = recordings.join(
-        rgs.select(["rg_id", "rg_title", "imdb_id", "movie_genres",
-                     *[c for c in ["tmdb_id", "tmdb_title"] if c in rgs.columns]]),
-        on="rg_id",
-        how="inner",
-    )
-    print(f"  Recordings matched to movies with genres: {rec_with_movie.shape[0]:,}")
+    rg_cols = ["rg_id", "rg_title", "imdb_id", "movie_genres",
+               *[c for c in ["tmdb_id", "tmdb_title"] if c in rgs.columns]]
+    rec_with_movie = recordings.join(rgs.select(rg_cols), on="rg_id", how="inner")
+    print(f"  Recordings matched to movies: {rec_with_movie.shape[0]:,}")
 
-    # A recording can appear in multiple soundtrack albums (e.g. re-releases).
-    # Keep one row per recording, preferring the first match.
-    rec_with_movie = rec_with_movie.unique(
-        subset="recording_mbid", keep="first"
-    )
+    rec_with_movie = rec_with_movie.unique(subset="recording_mbid", keep="first")
     print(f"  After dedup (one movie per recording): {rec_with_movie.shape[0]:,}")
 
     # ------------------------------------------------------------------
-    # Load AcousticBrainz feature CSVs
+    # Load and merge AcousticBrainz feature CSVs
     # ------------------------------------------------------------------
     print(f"\n--- Loading AcousticBrainz feature CSVs ---")
-    print(f"  (Each file is ~29M rows, this may take a minute)")
 
-    print(f"  Loading rhythm features: {ab_rhythm}")
+    print(f"  Loading rhythm: {ab_rhythm}")
     ab_r = pl.read_csv(ab_rhythm)
-    print(f"    Rows: {ab_r.shape[0]:,}, Columns: {ab_r.columns}")
+    print(f"    Rows: {ab_r.shape[0]:,}  Columns: {ab_r.columns}")
 
-    print(f"  Loading tonal features: {ab_tonal}")
+    print(f"  Loading tonal: {ab_tonal}")
     ab_t = pl.read_csv(ab_tonal)
-    print(f"    Rows: {ab_t.shape[0]:,}, Columns: {ab_t.columns}")
+    print(f"    Rows: {ab_t.shape[0]:,}  Columns: {ab_t.columns}")
 
-    print(f"  Loading lowlevel features: {ab_lowlevel}")
+    print(f"  Loading lowlevel: {ab_lowlevel}")
     ab_l = pl.read_csv(ab_lowlevel)
-    print(f"    Rows: {ab_l.shape[0]:,}, Columns: {ab_l.columns}")
+    print(f"    Rows: {ab_l.shape[0]:,}  Columns: {ab_l.columns}")
 
-    # Keep only primary submissions (offset == 0) to avoid duplicates
-    ab_r = ab_r.filter(pl.col("submission_offset") == 0)
-    ab_t = ab_t.filter(pl.col("submission_offset") == 0)
-    ab_l = ab_l.filter(pl.col("submission_offset") == 0)
+    # Verify no unexpected column overlaps (beyond mbid and submission_offset)
+    r_cols = set(ab_r.columns) - {"mbid", "submission_offset"}
+    t_cols = set(ab_t.columns) - {"mbid", "submission_offset"}
+    l_cols = set(ab_l.columns) - {"mbid", "submission_offset"}
+    overlaps = (r_cols & t_cols) | (r_cols & l_cols) | (t_cols & l_cols)
+    if overlaps:
+        print(f"\n  WARNING: Unexpected column overlaps across AB files: {overlaps}")
+        print("  These will produce duplicate-suffix columns in the join.")
 
-    print(f"\n  After keeping only primary submissions (offset=0):")
-    print(f"    Rhythm:   {ab_r.shape[0]:,}")
-    print(f"    Tonal:    {ab_t.shape[0]:,}")
-    print(f"    Lowlevel: {ab_l.shape[0]:,}")
+    # Filter to primary submissions only
+    ab_r = ab_r.filter(pl.col("submission_offset") == 0).drop("submission_offset")
+    ab_t = ab_t.filter(pl.col("submission_offset") == 0).drop("submission_offset")
+    ab_l = ab_l.filter(pl.col("submission_offset") == 0).drop("submission_offset")
 
-    # Merge the three feature files on mbid
-    ab_r = ab_r.drop("submission_offset")
-    ab_t = ab_t.drop("submission_offset").rename({"mbid": "mbid_t"})
-    ab_l = ab_l.drop("submission_offset").rename({"mbid": "mbid_l"})
+    print(f"\n  After offset=0 filter:")
+    print(f"    Rhythm:   {ab_r.shape[0]:,}  cols: {ab_r.columns}")
+    print(f"    Tonal:    {ab_t.shape[0]:,}  cols: {ab_t.columns}")
+    print(f"    Lowlevel: {ab_l.shape[0]:,}  cols: {ab_l.columns}")
 
-    ab_features = ab_r.join(
-        ab_t, left_on="mbid", right_on="mbid_t", how="inner"
-    ).join(
-        ab_l, left_on="mbid", right_on="mbid_l", how="inner"
+    # Join all three on mbid
+    # Using suffix to make accidental overlaps visible instead of silent
+    ab_features = (
+        ab_r
+        .join(ab_t, on="mbid", how="inner", suffix="_TONAL_DUP")
+        .join(ab_l, on="mbid", how="inner", suffix="_LOWLEVEL_DUP")
     )
 
+    # Drop any accidental duplicate columns
+    dup_cols = [c for c in ab_features.columns if c.endswith("_DUP")]
+    if dup_cols:
+        print(f"\n  WARNING: Dropping duplicate columns from join: {dup_cols}")
+        ab_features = ab_features.drop(dup_cols)
+
     print(f"\n  Merged AcousticBrainz features: {ab_features.shape[0]:,} rows")
-    print(f"  Feature columns: {ab_features.columns}")
+    print(f"  Columns: {ab_features.columns}")
 
     # ------------------------------------------------------------------
-    # Final join: soundtrack recordings ↔ AcousticBrainz features
+    # Final join: recordings ↔ AcousticBrainz
     # ------------------------------------------------------------------
-    print(f"\n--- Final join: soundtrack recordings ↔ AcousticBrainz features ---")
+    print(f"\n--- Final join: recordings ↔ AcousticBrainz ---")
 
-    # Normalize MBIDs to lowercase for matching
     rec_with_movie = rec_with_movie.with_columns(
         pl.col("recording_mbid").str.to_lowercase()
     )
@@ -266,63 +243,74 @@ def main():
     )
 
     final = rec_with_movie.join(
-        ab_features,
-        left_on="recording_mbid",
-        right_on="mbid",
-        how="inner",
+        ab_features, left_on="recording_mbid", right_on="mbid", how="inner"
     )
 
-    print(f"  Matched rows: {final.shape[0]:,}")
-    print(f"  Unique recordings: {final['recording_mbid'].n_unique():,}")
+    print(f"  Matched rows:        {final.shape[0]:,}")
+    print(f"  Unique recordings:   {final['recording_mbid'].n_unique():,}")
     print(f"  Unique movies/shows: {final['imdb_id'].n_unique():,}")
 
     if final.shape[0] == 0:
-        print("\nERROR: No matches found between soundtrack recordings and AcousticBrainz.")
-        print("  This means none of the soundtrack recording MBIDs appear in AcousticBrainz.")
-        print(f"  Recordings sample: {rec_with_movie['recording_mbid'].head(5).to_list()}")
-        print(f"  AcousticBrainz sample: {ab_features.head(5).select('mbid').to_series().to_list()}")
+        print("\nERROR: No matches. Check MBID samples:")
+        print(f"  Recordings: {rec_with_movie['recording_mbid'].head(3).to_list()}")
+        print(f"  AcousticBrainz: {ab_features['mbid'].head(3).to_list()}")
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # Explode TMDB multi-genre strings into a primary_movie_genre column
+    # Process movie genres
     # ------------------------------------------------------------------
     print(f"\n--- Processing movie genres ---")
 
-    # TMDB genres are typically comma-separated or JSON-like strings.
-    # We'll extract the first genre as primary and keep the full string.
-    if "movie_genres" in final.columns:
-        final = final.with_columns([
-            # Clean up genre string (remove brackets/quotes if JSON-like)
-            pl.col("movie_genres")
-              .cast(pl.Utf8)
-              .str.replace_all(r"[\[\]'\"]", "")
-              .str.strip_chars()
-              .alias("movie_genres"),
-        ])
+    final = final.with_columns(
+        pl.col("movie_genres")
+          .cast(pl.Utf8)
+          .str.replace_all(r"[\[\]'\"]", "")
+          .str.strip_chars()
+          .alias("movie_genres")
+    )
 
-        # Primary genre = first in the comma-separated list
-        final = final.with_columns(
-            pl.col("movie_genres")
-              .str.split(",")
-              .list.first()
-              .str.strip_chars()
-              .alias("primary_movie_genre")
-        )
+    final = final.with_columns(
+        pl.col("movie_genres")
+          .str.split(",")
+          .list.first()
+          .str.strip_chars()
+          .alias("primary_movie_genre")
+    )
 
-        print(f"  Primary movie genre distribution (top 20):")
-        genre_dist = (
-            final
-            .filter(pl.col("primary_movie_genre").is_not_null()
-                    & (pl.col("primary_movie_genre") != ""))
-            .group_by("primary_movie_genre")
-            .len()
-            .sort("len", descending=True)
-            .head(20)
-        )
-        print(genre_dist)
+    print(f"  Genre distribution (top 20):")
+    print(
+        final.filter(pl.col("primary_movie_genre").is_not_null()
+                     & (pl.col("primary_movie_genre") != ""))
+        .group_by("primary_movie_genre").len()
+        .sort("len", descending=True).head(20)
+    )
 
     # ------------------------------------------------------------------
-    # Clean up and write output
+    # One-hot encode categorical features (key_key, key_scale)
+    # ------------------------------------------------------------------
+    print(f"\n--- One-hot encoding categorical features ---")
+
+    if "key_key" in final.columns:
+        unique_keys = sorted(final["key_key"].drop_nulls().unique().to_list())
+        print(f"  key_key values ({len(unique_keys)}): {unique_keys}")
+        for k in unique_keys:
+            final = final.with_columns(
+                (pl.col("key_key") == k).cast(pl.Int8).alias(f"key_{k}")
+            )
+        final = final.drop("key_key")
+        print(f"  Created {len(unique_keys)} one-hot columns (key_A, key_B, ...)")
+
+    if "key_scale" in final.columns:
+        unique_scales = sorted(final["key_scale"].drop_nulls().unique().to_list())
+        print(f"  key_scale values: {unique_scales}")
+        final = final.with_columns(
+            (pl.col("key_scale") == "minor").cast(pl.Int8).alias("scale_minor")
+        )
+        final = final.drop("key_scale")
+        print(f"  Created 1 column: scale_minor (1=minor, 0=major)")
+
+    # ------------------------------------------------------------------
+    # Select and order columns, write output
     # ------------------------------------------------------------------
     print(f"\n--- Writing final dataset ---")
 
@@ -331,15 +319,13 @@ def main():
         "imdb_id", "rg_id", "rg_title",
         "primary_movie_genre", "movie_genres",
     ]
-    # Add tmdb columns if present
     for c in ["tmdb_id", "tmdb_title"]:
         if c in final.columns:
             metadata_cols.append(c)
 
     feature_cols = [c for c in final.columns
                     if c not in metadata_cols
-                    and c not in ("track_position", "primary_type",
-                                  "imdb_id_right")]
+                    and c not in ("track_position", "primary_type", "imdb_id_right")]
 
     desired_cols = metadata_cols + sorted(feature_cols)
     final_cols = [c for c in desired_cols if c in final.columns]
@@ -365,26 +351,19 @@ def main():
     print(f"  Unique movies/shows: {n_movies:,}")
     print(f"  Unique movie genres: {n_genres:,}")
 
-    print(f"\n  Feature columns available:")
-    for c in sorted(feature_cols):
-        if c in final.columns:
-            print(f"    {c:45s}  {final[c].dtype}")
+    print(f"\n  All columns in output ({len(final_cols)}):")
+    for c in final_cols:
+        print(f"    {c:50s}  {final[c].dtype}")
 
     if n_rows >= 50_000:
         print(f"\n  ✓ Dataset exceeds 50k rows!")
     else:
         print(f"\n  ⚠ Only {n_rows:,} rows — below the 50k target.")
-        print(f"    Possible fixes:")
-        print(f"    1. Keep all submission_offsets (not just offset=0)")
-        print(f"    2. Allow multiple genre rows per recording")
-        print(f"       (one row per movie genre in the TMDB list)")
-        print(f"    3. Include release groups without IMDB links")
-        print(f"       and try fuzzy-matching titles to TMDB")
 
     print(f"\n  Sample rows:")
     sample_cols = [c for c in ["recording_mbid", "track_title", "artist",
                                 "imdb_id", "primary_movie_genre", "bpm",
-                                "danceability", "key_key", "average_loudness"]
+                                "danceability", "average_loudness", "scale_minor"]
                    if c in final.columns]
     print(final.select(sample_cols).head(10))
 
