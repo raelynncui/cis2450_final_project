@@ -2,8 +2,8 @@
 step1_parse_soundtracks.py
 
 Parses MusicBrainz JSON dumps to extract:
-  1A. Soundtrack release groups with IMDB links  →  mb_soundtrack_rgs.csv
-  1B. Recording MBIDs for those release groups   →  mb_soundtrack_recordings.csv
+  1A. Soundtrack release groups with IMDB links  -->  mb_soundtrack_rgs.csv
+  1B. Recording MBIDs for those release groups   -->  mb_soundtrack_recordings.csv
 """
 
 import json
@@ -14,28 +14,20 @@ import re
 import sys
 from tqdm import tqdm
 
-# ============================================================================
-# CONFIG
-# ============================================================================
+
 MB_RELEASE_GROUP_PATH = "release-group.tar.xz"
 MB_RELEASE_PATH = "release.tar.xz"
-
 OUT_SOUNDTRACK_RGS = "mb_soundtrack_rgs.csv"
 OUT_SOUNDTRACK_RECORDINGS = "mb_soundtrack_recordings.csv"
 
 
-# ============================================================================
-# Helpers
-# ============================================================================
-
 def extract_imdb_id(url: str) -> str | None:
-    """Extract an IMDB title ID (e.g. 'tt0111161') from an IMDB URL."""
     m = re.search(r"(tt\d{7,})", url)
     return m.group(1) if m else None
 
 
+# Extract artist string from an artist-credit array
 def _extract_artist(artist_credit) -> str:
-    """Extract a human-readable artist string from an artist-credit array."""
     if not artist_credit or not isinstance(artist_credit, list):
         return ""
     parts = []
@@ -54,25 +46,12 @@ def _extract_artist(artist_credit) -> str:
     return "".join(parts).strip()
 
 
-# ============================================================================
-# STEP 1A: Parse release-group dump → soundtrack RGs with IMDB links
-# ============================================================================
+"""
+    Parse release-group.tar.xz to find soundtrack release groups with IMDB links.
+    Outputs a CSV with columns: rg_id, rg_title, imdb_id, primary_type
+"""
 
 def parse_release_groups(tar_path: str, out_csv: str):
-    """
-    Stream through release-group.tar.xz.
-    Find release groups that:
-      - Have secondary-type "Soundtrack"
-      - Have an IMDB URL in their relations
-
-    Output CSV columns:
-        rg_id, rg_title, imdb_id, primary_type
-    """
-    print(f"\n{'='*60}")
-    print("STEP 1A: Parsing release-group dump for soundtracks with IMDB links")
-    print(f"{'='*60}")
-    print(f"  File: {tar_path}")
-
     total = 0
     soundtrack_count = 0
     imdb_match_count = 0
@@ -97,7 +76,7 @@ def parse_release_groups(tar_path: str, out_csv: str):
                     except json.JSONDecodeError:
                         continue
 
-                    # ---- Check if this is a soundtrack ----
+                    # Check if this is a soundtrack
                     secondary_types = rg.get("secondary-types", [])
                     if not secondary_types:
                         stl = rg.get("secondary-type-list", {})
@@ -113,7 +92,7 @@ def parse_release_groups(tar_path: str, out_csv: str):
                         continue
                     soundtrack_count += 1
 
-                    # ---- Look for IMDB URL in relations ----
+                    # Look for IMDB URL 
                     relations = rg.get("relations", [])
                     imdb_id = None
                     for rel in relations:
@@ -139,19 +118,12 @@ def parse_release_groups(tar_path: str, out_csv: str):
                         primary_type = rg.get("primary-type", "")
                         writer.writerow([rg_id, rg_title, imdb_id, primary_type])
 
-    print(f"\n  Results:")
-    print(f"    Total release groups scanned:        {total:,}")
-    print(f"    Soundtrack release groups found:      {soundtrack_count:,}")
-    print(f"    Soundtracks with IMDB link (kept):   {imdb_match_count:,}")
-    print(f"    Output: {out_csv}")
 
 
-# ============================================================================
-# STEP 1B: Parse release dump → recording MBIDs for soundtrack RGs
-# ============================================================================
-
+"""
+Load mapping of release group ID --> imdb_id from previous step output
+"""
 def _load_soundtrack_rg_ids(rgs_csv: str) -> dict:
-    """Load mapping of release group ID → imdb_id from step 1A output."""
     rg_map = {}
     with open(rgs_csv, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -160,25 +132,17 @@ def _load_soundtrack_rg_ids(rgs_csv: str) -> dict:
     return rg_map
 
 
+"""
+Parse through release.tar.xz (only process releases whose release group is in the soundtrack set from previous step 1A)
+Then, extract recording MBIDs and track metadata
+
+Outputs a CSV columns with: recording_mbid, rg_id, imdb_id, track_title, artist, track_position
+"""
+
 def parse_releases(tar_path: str, out_csv: str, rgs_csv: str):
-    """
-    Stream through release.tar.xz.
-    Only process releases whose release group is in the soundtrack set
-    from step 1A. Extract recording MBIDs and track metadata.
 
-    Output CSV columns:
-        recording_mbid, rg_id, imdb_id, track_title, artist, track_position
-    """
-    print(f"\n{'='*60}")
-    print("STEP 1B: Parsing release dump for soundtrack recording MBIDs")
-    print(f"{'='*60}")
-    print(f"  File: {tar_path}")
-    print("  (This file is ~335 GB uncompressed — expect 1-3 hours)")
-
-    # Load the soundtrack release group IDs from step 1A
-    print(f"  Loading soundtrack release group IDs from {rgs_csv}...")
+    # Load the soundtrack release group IDs from previous step
     rg_map = _load_soundtrack_rg_ids(rgs_csv)
-    print(f"  Soundtrack release groups to match: {len(rg_map):,}")
 
     total = 0
     matched_releases = 0
@@ -248,57 +212,29 @@ def parse_releases(tar_path: str, out_csv: str, rgs_csv: str):
                                              track_title, artist, track_pos])
                             track_rows += 1
 
-                    if total % 1_000_000 == 0:
-                        print(f"    ...processed {total:,} releases, "
-                              f"{matched_releases:,} matched, "
-                              f"{track_rows:,} track rows so far")
-
-    print(f"\n  Results:")
-    print(f"    Total releases scanned:           {total:,}")
-    print(f"    Matched soundtrack releases:       {matched_releases:,}")
-    print(f"    Recording rows written:            {track_rows:,}")
-    print(f"    Output: {out_csv}")
-    print(f"\n  Note: duplicates will be removed in step 2 using Polars.")
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
 
 def main():
-    # Step 1A
     if os.path.exists(OUT_SOUNDTRACK_RGS):
-        print(f"  {OUT_SOUNDTRACK_RGS} already exists — skipping step 1A.")
-        print(f"  (Delete it to re-run)")
+        # File already exists — skip parsing release groups
+        pass
     else:
         if not os.path.exists(MB_RELEASE_GROUP_PATH):
             print(f"ERROR: {MB_RELEASE_GROUP_PATH} not found.")
-            print("Update MB_RELEASE_GROUP_PATH in the CONFIG section.")
             sys.exit(1)
         parse_release_groups(MB_RELEASE_GROUP_PATH, OUT_SOUNDTRACK_RGS)
 
-    # Step 1B
     if os.path.exists(OUT_SOUNDTRACK_RECORDINGS):
-        print(f"\n  {OUT_SOUNDTRACK_RECORDINGS} already exists — skipping step 1B.")
-        print(f"  (Delete it to re-run)")
+        # File already exists — skip parsing releases
+        pass
     else:
         if not os.path.exists(MB_RELEASE_PATH):
             print(f"ERROR: {MB_RELEASE_PATH} not found.")
-            print("Update MB_RELEASE_PATH in the CONFIG section.")
             sys.exit(1)
         if not os.path.exists(OUT_SOUNDTRACK_RGS):
-            print(f"ERROR: {OUT_SOUNDTRACK_RGS} not found. Run step 1A first.")
+            print(f"ERROR: {OUT_SOUNDTRACK_RGS} not found.")
             sys.exit(1)
         parse_releases(MB_RELEASE_PATH, OUT_SOUNDTRACK_RECORDINGS,
                        OUT_SOUNDTRACK_RGS)
-
-    print(f"\n{'='*60}")
-    print("STEP 1 COMPLETE")
-    print(f"{'='*60}")
-    print(f"  Intermediate files ready for step 2:")
-    print(f"    {OUT_SOUNDTRACK_RGS}")
-    print(f"    {OUT_SOUNDTRACK_RECORDINGS}")
-    print(f"\n  Next: python step2_build_movie_genre_dataset.py")
 
 
 if __name__ == "__main__":
